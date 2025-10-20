@@ -2,7 +2,6 @@
 // File: @openzeppelin\contracts\token\ERC20\IERC20.sol
 
 // OpenZeppelin Contracts (last updated v4.9.0) (token/ERC20/IERC20.sol)
-
 pragma solidity ^0.8.0;
 
 /**
@@ -714,6 +713,7 @@ contract PowerToken is ERC20, Ownable, ERC20Burnable {
     }
 }
 
+// File: contracts\coffeeSalev2.sol
 
 pragma solidity ^0.8.0;
 
@@ -807,12 +807,10 @@ contract powerShop is Ownable {
     function _setSwapToken(
         address payToken,
         uint256 powerPerPrice,
-        uint256 tokenDecimals,
         uint256 exchangeRate,
         uint256 lastPriceUpdateTime
     ) internal {
         require(payToken != address(0), "Invalid token");
-        require(tokenDecimals > 0, "Invalid token decimals");
         require(powerPerPrice > 0, "Invalid power per price");
         require(exchangeRate > 0, "Invalid exchange rate");
         require(
@@ -820,29 +818,28 @@ contract powerShop is Ownable {
             "Token already set"
         );
 
+        uint256 decimals = 10 ** ERC20(payToken).decimals();
         supportedSwapToken[payToken] = SwapTokenInfo({
             powerPerPrice: powerPerPrice,
-            tokenDecimals: tokenDecimals,
+            tokenDecimals: decimals,
             exchangeRate: exchangeRate,
             lastPriceUpdateTime: lastPriceUpdateTime,
             isSupported: true,
             totalPower: 0
         });
 
-        emit SwapTokenSet(payToken, powerPerPrice, tokenDecimals);
+        emit SwapTokenSet(payToken, powerPerPrice, decimals);
     }
 
     function setSwapToken(
         address payToken,
         uint256 powerPerPrice,
-        uint256 tokenDecimals,
         uint256 exchangeRate,
         uint256 lastPriceUpdateTime
     ) public onlyOwner {
         _setSwapToken(
             payToken,
             powerPerPrice,
-            tokenDecimals,
             exchangeRate,
             lastPriceUpdateTime
         );
@@ -873,16 +870,21 @@ contract powerShop is Ownable {
     }
 
     function updatePrice(address payToken) public {
-        if (
-            block.timestamp >=
-            supportedSwapToken[payToken].lastPriceUpdateTime + 1 days
-        ) {
-            supportedSwapToken[payToken].powerPerPrice =
-                (supportedSwapToken[payToken].powerPerPrice *
-                    (PRICE_DENOMINATOR + priceIncreasePerDay)) /
-                PRICE_DENOMINATOR;
-            supportedSwapToken[payToken].lastPriceUpdateTime += 1 days;
+        if (block.timestamp <= supportedSwapToken[payToken].lastPriceUpdateTime)
+            return;
+
+        uint256 elapsed = block.timestamp -
+            supportedSwapToken[payToken].lastPriceUpdateTime;
+
+        // 每秒线性摊：powerPerPrice += powerPerPrice * (priceIncreasePerDay) * 秒数 / 86400 / PRICE_DENOMINATOR
+        uint256 delta = (supportedSwapToken[payToken].powerPerPrice *
+            priceIncreasePerDay *
+            elapsed) / (PRICE_DENOMINATOR * 86400);
+
+        if (delta > 0) {
+            supportedSwapToken[payToken].powerPerPrice += delta;
         }
+        supportedSwapToken[payToken].lastPriceUpdateTime = block.timestamp;
 
         emit PriceUpdated(payToken, supportedSwapToken[payToken].powerPerPrice);
     }
@@ -897,8 +899,7 @@ contract powerShop is Ownable {
             (payAmount *
                 supportedSwapToken[payToken].powerPerPrice *
                 supportedSwapToken[payToken].exchangeRate) /
-            10000 /
-            supportedSwapToken[payToken].tokenDecimals;
+            (10000 * supportedSwapToken[payToken].tokenDecimals);
     }
 
     function deposit(uint256 payAmount, address payToken) public {
@@ -909,9 +910,7 @@ contract powerShop is Ownable {
         updatePrice(payToken);
         uint256 tokensToBuy = (payAmount *
             swapTokenInfo.powerPerPrice *
-            swapTokenInfo.exchangeRate) /
-            10000 /
-            swapTokenInfo.tokenDecimals; // 每USDT可兌換算力
+            swapTokenInfo.exchangeRate) / (10000 * swapTokenInfo.tokenDecimals); // 每USDT可兌換算力
         require(tokensToBuy > 0, "Not enough pay token for 1 token");
 
         TransferHelper.safeTransferFrom(
@@ -938,24 +937,11 @@ contract powerShop is Ownable {
 
         SwapTokenInfo storage swapTokenInfo = supportedSwapToken[payToken];
 
-        // 不足一天的磨损部分
-        uint256 fee = 0;
         uint256 refundAmount = (powerAmount *
             swapTokenInfo.tokenDecimals *
-            10000) /
-            swapTokenInfo.exchangeRate /
-            swapTokenInfo.powerPerPrice;
+            10000) / (swapTokenInfo.exchangeRate * swapTokenInfo.powerPerPrice);
 
-        if (block.timestamp > swapTokenInfo.lastPriceUpdateTime) {
-            uint256 timeDiff = block.timestamp -
-                swapTokenInfo.lastPriceUpdateTime;
-            fee =
-                (refundAmount * timeDiff * priceIncreasePerDay) /
-                PRICE_DENOMINATOR /
-                86400;
-        }
-
-        uint256 payRefund = refundAmount - fee;
+        uint256 payRefund = refundAmount;
         token.transferFrom(msg.sender, address(this), powerAmount);
         token.burn(powerAmount);
         swapTokenAmount[msg.sender][payToken] -= powerAmount;
