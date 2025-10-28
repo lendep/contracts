@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MIT
-// File: contracts\MasterChef.sol
 
 pragma solidity ^0.8.0;
 
@@ -16,6 +15,8 @@ interface IERC20 {
      * @dev Returns the amount of tokens owned by `account`.
      */
     function balanceOf(address account) external view returns (uint256);
+
+    function decimals() external view returns (uint8);
 
     /**
      * @dev Moves `amount` tokens from the caller's account to `recipient`.
@@ -432,32 +433,123 @@ library Address {
     }
 }
 
-library TransferHelper {
-    function safeTransfer(address token, address to, uint value) internal {
-        // bytes4(keccak256(bytes('transfer(address,uint256)')));
-        (bool success, bytes memory data) = token.call(
-            abi.encodeWithSelector(0xa9059cbb, to, value)
-        );
-        require(
-            success && (data.length == 0 || abi.decode(data, (bool))),
-            "TransferHelper: TRANSFER_FAILED"
+/**
+ * @title SafeERC20
+ * @dev Wrappers around ERC20 operations that throw on failure (when the token
+ * contract returns false). Tokens that return no value (and instead revert or
+ * throw on failure) are also supported, non-reverting calls are assumed to be
+ * successful.
+ * To use this library you can add a `using SafeERC20 for IERC20;` statement to your contract,
+ * which allows you to call the safe operations as `token.safeTransfer(...)`, etc.
+ */
+library SafeERC20 {
+    using SafeMath for uint256;
+    using Address for address;
+
+    function safeTransfer(IERC20 token, address to, uint256 value) internal {
+        _callOptionalReturn(
+            token,
+            abi.encodeWithSelector(token.transfer.selector, to, value)
         );
     }
 
     function safeTransferFrom(
-        address token,
+        IERC20 token,
         address from,
         address to,
-        uint value
+        uint256 value
     ) internal {
-        // bytes4(keccak256(bytes('transferFrom(address,address,uint256)')));
-        (bool success, bytes memory data) = token.call(
-            abi.encodeWithSelector(0x23b872dd, from, to, value)
+        _callOptionalReturn(
+            token,
+            abi.encodeWithSelector(token.transferFrom.selector, from, to, value)
         );
+    }
+
+    /**
+     * @dev 已弃用。
+     * 此函数存在与 {IERC20-approve} 中发现的问题类似的问题，不鼓励使用。
+     *
+     * 如果可能，请改用 {safeIncreaseAllowance} 和 {safeDecreaseAllowance}。
+     */
+    function safeApprove(
+        IERC20 token,
+        address spender,
+        uint256 value
+    ) internal {
+        // safeApprove should only be called when setting an initial allowance,
+        // or when resetting it to zero. To increase and decrease it, use
+        // 'safeIncreaseAllowance' and 'safeDecreaseAllowance'
+        // solhint-disable-next-line max-line-length
         require(
-            success && (data.length == 0 || abi.decode(data, (bool))),
-            "TransferHelper: TRANSFER_FROM_FAILED"
+            (value == 0) || (token.allowance(address(this), spender) == 0),
+            "SafeERC20: approve from non-zero to non-zero allowance"
         );
+        _callOptionalReturn(
+            token,
+            abi.encodeWithSelector(token.approve.selector, spender, value)
+        );
+    }
+
+    function safeIncreaseAllowance(
+        IERC20 token,
+        address spender,
+        uint256 value
+    ) internal {
+        uint256 newAllowance = token.allowance(address(this), spender).add(
+            value
+        );
+        _callOptionalReturn(
+            token,
+            abi.encodeWithSelector(
+                token.approve.selector,
+                spender,
+                newAllowance
+            )
+        );
+    }
+
+    function safeDecreaseAllowance(
+        IERC20 token,
+        address spender,
+        uint256 value
+    ) internal {
+        uint256 newAllowance = token.allowance(address(this), spender).sub(
+            value,
+            "SafeERC20: decreased allowance below zero"
+        );
+        _callOptionalReturn(
+            token,
+            abi.encodeWithSelector(
+                token.approve.selector,
+                spender,
+                newAllowance
+            )
+        );
+    }
+
+    /**
+     * @dev Imitates a Solidity high-level call (i.e. a regular function call to a contract), relaxing the requirement
+     * on the return value: the return value is optional (but if data is returned, it must not be false).
+     * @param token The token targeted by the call.
+     * @param data The call data (encoded using abi.encode or one of its variants).
+     */
+    function _callOptionalReturn(IERC20 token, bytes memory data) private {
+        // We need to perform a low level call here, to bypass Solidity's return data size checking mechanism, since
+        // we're implementing it ourselves. We use {Address.functionCall} to perform this call, which verifies that
+        // the target address contains contract code and also asserts for success in the low-level call.
+
+        bytes memory returndata = address(token).functionCall(
+            data,
+            "SafeERC20: low-level call failed"
+        );
+        if (returndata.length > 0) {
+            // Return data is optional
+            // solhint-disable-next-line max-line-length
+            require(
+                abi.decode(returndata, (bool)),
+                "SafeERC20: ERC20 operation did not succeed"
+            );
+        }
     }
 }
 
@@ -558,20 +650,21 @@ contract Ownable is Context {
 //
 contract MasterChef is Ownable {
     using SafeMath for uint256;
+    using SafeERC20 for IERC20;
 
     // 每个用户的信息。
     struct UserInfo {
-        uint256 amount; // 用户提供了多少 PowerToken。
+        uint256 amount; // 用户提供了多少 LP 代币。
         uint256 rewardDebt; // 用户已经获取的奖励
         uint256 totalReward; // 累计获得的奖励
         //
         // 我们在这里做一些花哨的数学运算。
         // 基本上，在任何时间点，有权授予用户但待分配的 SUSHI 数量为：
         //
-        //   pending reward = (user.amount * pool.accRewardPerShare) - user.rewardDebt
+        //   pending reward = (user.amount * pool.accSushiPerShare) - user.rewardDebt
         //
-        // 每当用户将 PowerToken 存入或提取到池中时。这是发生的事情：
-        //   1. 池的 `accRewardPerShare`（和 `lastRewardTime`）得到更新。
+        // 每当用户将 LP 代币存入或提取到池中时。这是发生的事情：
+        //   1. 池的 `accSushiPerShare`（和 `lastRewardBlock`）得到更新。
         //   2. 用户收到发送到他/她的地址的待处理奖励。
         //   3. 用户的“金额”得到更新。
         //   4. 用户的“rewardDebt”得到更新。
@@ -579,99 +672,96 @@ contract MasterChef is Ownable {
 
     // 每个池的信息。
     struct PoolInfo {
-        address powerToken; // PowerToken 合约地址。
-        uint256 lastRewardTime; //  分配发生的最后一个时间戳。
+        IERC20 lpToken; // LP 代币合约地址。
+        uint256 decimals; // LP 代币的精度
+        uint256 totalPower;
+        uint256 allocPoint; // 分配给此池的分配点数。 SUSHI 分配每个块。
+        uint256 lastRewardTime; // SUSHI 分配发生的最后一个块号。
+        uint256 accSushiPerShare; // 质押一个LPToken的全局收益
     }
 
-    // 礦池結構
-    struct Pool {
-        address creator;
-        uint256 totalPower;
-        uint256 createdAt;
-        uint256 allocPoint; // 分配點數，等於 totalPower
-        uint256 accRewardPerShare; // 累積每份算力的收益
-        uint256 lastRewardTime; // 上次更新收益的時間
-    }
-    mapping(uint256 => Pool) public pools; // poolId => Pool
-    mapping(string => uint256) public poolIdByCommand; // command => poolId
-    mapping(uint256 => string) public commandByPoolId; // poolId => command
-    uint256 public nextPoolId = 1;
-    mapping(address => uint256) public userPool; // user => poolId (0表示未加入)
-    uint256 public totalAllocPoint; // 總分配點數
 
     // The SUSHI TOKEN!
     IERC20 public token;
 
-    // 初始每10分鐘獎勵50個
-    uint256 public constant INITIAL_REWARD = 50e18; // 50個token，18位精度
+    uint256 public powerPerPrice = 1e18; // 1 Power的价格
+    uint256 public lastPriceUpdateTime; // 上次更新价格的时间
+    uint256 public depreciationPerDayBps = 30; // 0.3% = 30/10000
+    uint256 public constant PRICE_DENOMINATOR = 10000;
+
+    // 初始每10分钟奖励50个
+    uint256 public constant INITIAL_REWARD = 50e18; // 50个token，18位精度
     uint256 public BlockRewards = 50e18;
-    uint256 public constant REWARD_INTERVAL = 600; // 10分鐘=600秒
+    uint256 public constant REWARD_INTERVAL = 600; // 10分钟=600秒
     uint256 public tokenPerSecond = INITIAL_REWARD / REWARD_INTERVAL;
     uint256 public constant HALVING_INTERVAL = 210000 * 600; // 2100000分钟=126000000秒
 
-    address public Operator; // 操作员
-    bool public createPoolPublic = false; // 是否公开创建矿池
-
-    // 单一池信息
-    PoolInfo public poolInfo;
-    // 每个持有 PowerToken 的用户的信息。
-    mapping(address => UserInfo) public userInfo;
-
     uint256 private constant INVITE_REWARD_RATE_BASIS_POINTS = 10000;
     uint256 private constant BURN_RATE_BASIS_POINTS = 1000;
-    uint256 public inviteRewardRate = 500; // 邀请人奖励比例 500/10000 = 5%
-    uint256 public burnRate = 1500; // 烧伤比例门槛 1000/1000 = 100% 邀请人和下级的算力比必须大于这个比例才能拿满奖励
+    uint256 public inviteRewardRate = 500; // 邀请人奖励比例 1000/10000 = 10%
+    uint256 public burnRate = 1000; // 烧伤比例门槛 1000/1000 = 100% 邀请人和下级的算力比必须大于等于这个比例才能拿满奖励
+    address public fundAddress; // 基金地址
+    
+
+    
+    address public operator;
+    uint256 public nextNodeId = 1;
+    bool public createNodePublic = false; // 是否公开创建矿池
+    mapping(uint256 => address) public nodes;
+    mapping(address => uint256) public userNode; 
 
     mapping(address => address) public inviter; //邀请人
     mapping(address => uint256) public inviteCount; //邀请人好友数
     mapping(address => uint256) public totalInviteReward; //累计奖励
 
+    // 每个池的信息。
+    PoolInfo[] public poolInfo;
+    // 每个持有 LP 代币的用户的信息。
+    mapping(uint256 => mapping(address => UserInfo)) public userInfo;
+    mapping(address => uint256) public Pid;
+    // 总分配点数。 必须是所有池中所有分配点的总和。
+    uint256 public totalAllocPoint = 0;
     // SUSHI 挖矿开始时的时间戳。
     uint256 public startTime;
-    // 活躍礦工數量
-    uint256 public activeMiners;
 
-    event OperatorSet(address indexed operator);
-    event CreatePoolPublicSet(bool indexed createPoolPublic);
-    event TransferPool(
-        uint256 poolId,
-        address indexed oldCreator,
-        address indexed newCreator
+    event Deposit(
+        address indexed user,
+        uint256 indexed pid,
+        uint256 amount,
+        uint256 powerAmount
     );
-    event CreatePool(address indexed creator, uint256 poolId);
-
-    event Deposit(address indexed user, uint256 amount);
-    event Withdraw(address indexed user, uint256 amount);
-    event EmergencyWithdraw(address indexed user, uint256 amount);
-    event SetPoolCommand(uint256 poolId, string command);
-    event JoinPool(address indexed user, uint256 poolId);
-    event LeavePool(address indexed user);
-    event TakeUserReward(address indexed user, uint256 amount);
-    event TakeFee(address indexed user, uint256 amount);
+    event Withdraw(
+        address indexed user,
+        uint256 indexed pid,
+        uint256 amount,
+        uint256 powerAmount
+    );
+    event EmergencyWithdraw(
+        address indexed user,
+        uint256 indexed pid,
+        uint256 amount,
+        uint256 powerAmount
+    );
     event BindInviter(address indexed user, address indexed inviter);
     event InviteReward(
+        uint256 indexed pid,
         address indexed user,
         address indexed inviter,
         uint256 amount
     );
+    event TakeUserReward(
+        uint256 indexed pid,
+        address indexed user,
+        uint256 amount
+    );
+    
+    event OperatorSet(address indexed operator);
 
-    constructor(IERC20 _minetoken, uint256 _startTime, address _powerToken) {
-        token = _minetoken;
+    constructor(address _token, uint256 _startTime, address _fundAddress) {
+        token = IERC20(_token);
         startTime = _startTime;
-        poolInfo = PoolInfo({
-            powerToken: _powerToken,
-            lastRewardTime: _startTime
-        });
-    }
-
-    function setOperator(address _operator) external onlyOwner {
-        Operator = _operator;
-        emit OperatorSet(_operator);
-    }
-
-    function setCreatePoolPublic() external onlyOwner {
-        createPoolPublic = !createPoolPublic;
-        emit CreatePoolPublicSet(createPoolPublic);
+        fundAddress = _fundAddress;
+        lastPriceUpdateTime = startTime;
     }
 
     function setInviteRewardRate(uint256 _inviteRewardRate) external onlyOwner {
@@ -682,8 +772,47 @@ contract MasterChef is Ownable {
         inviteRewardRate = _inviteRewardRate;
     }
 
-    function setBurnRate(uint256 _burnRate) external onlyOwner {
-        burnRate = _burnRate;
+    modifier onlyOperator() {
+        require(msg.sender == operator, "Not operator");
+        _;
+    }
+
+    function setOperator(address _operator) external onlyOwner {
+        operator = _operator;
+        emit OperatorSet(_operator);
+    }
+
+    function setCreateNodePublic() external onlyOwner {
+        createNodePublic = !createNodePublic;
+    }
+
+    function CreateNode(address user) public returns (uint256){
+        if(!createNodePublic)
+        {
+            require(msg.sender == operator,"Not operator");
+        }
+        uint256 NodeId = nextNodeId++;
+
+        nodes[NodeId]  = user;
+        return NodeId;
+    }
+
+    function joinNode(uint256 id) public returns (bool){
+        require(nodes[id] != address(0),"node not exist");
+        userNode[msg.sender] = id;
+        return true;
+    }
+
+    function transferNode(uint256 id,address user) public returns (bool){
+        require(nodes[id] != msg.sender,"permission denied");
+        nodes[id] = user;
+        return true;
+    }
+
+
+    function setFundAddress(address _fundAddress) external onlyOwner {
+        require(_fundAddress != address(0), "Invalid fund address");
+        fundAddress = _fundAddress;
     }
 
     function Halving() public {
@@ -702,389 +831,286 @@ contract MasterChef is Ownable {
         return BlockRewards / REWARD_INTERVAL;
     }
 
-    // 修改pendingSushi和updatePool逻辑，动态获取每秒奖励
-    function pendingSushi(address _user) external view returns (uint256) {
-        UserInfo storage user = userInfo[_user];
-        uint256 poolId = userPool[_user];
-
-        if (poolId == 0 || user.amount == 0) {
-            return 0;
-        }
-
-        Pool storage pool = pools[poolId];
-        uint256 accRewardPerShare = pool.accRewardPerShare;
-
-        // 計算礦池的額外收益（從上次更新到現在）
-        if (
-            block.timestamp > pool.lastRewardTime &&
-            pool.allocPoint > 0 &&
-            totalAllocPoint > 0
-        ) {
-            uint256 timeElapsed = block.timestamp - pool.lastRewardTime;
-            uint256 poolTimeReward = (timeElapsed *
-                currentRewardPerSecond() *
-                pool.allocPoint) / totalAllocPoint;
-
-            if (pool.totalPower > 0) {
-                accRewardPerShare = accRewardPerShare.add(
-                    poolTimeReward.mul(1e12).div(pool.totalPower)
-                );
-            }
-        }
-
-        return
-            user.amount.mul(accRewardPerShare).div(1e12).sub(user.rewardDebt);
+    function poolLength() external view returns (uint256) {
+        return poolInfo.length;
     }
 
-    // 更新池的奖励变量以保持最新。
-    function updatePool() public {
-        PoolInfo storage pool = poolInfo;
+    // 将新的 lp 添加到池中。 只能由所有者调用。
+    // XXX 不要多次添加相同的 LP 令牌。 如果你这样做，奖励会被搞砸。
+    // _allocPoint 分配点
+    // _withUpdate 是否马上更新所有池的奖励变量。 小心汽油消费！
+    function add(
+        uint256 _allocPoint,
+        IERC20 _lpToken,
+        bool _withUpdate
+    ) public onlyOwner {
+        require(Pid[address(_lpToken)] == 0); //防呆，避免重复添加池
+
+        if (_withUpdate) {
+            massUpdatePools();
+        }
+        uint256 lastRewardTime = block.timestamp > startTime
+            ? block.timestamp
+            : startTime;
+        totalAllocPoint = totalAllocPoint.add(_allocPoint);
+        poolInfo.push(
+            PoolInfo({
+                lpToken: _lpToken,
+                decimals:10 ** _lpToken.decimals(),
+                allocPoint: _allocPoint,
+                lastRewardTime: lastRewardTime,
+                accSushiPerShare: 0,
+                totalPower: 0
+            })
+        );
+
+        Pid[address(_lpToken)] = poolInfo.length;
+    }
+
+    // 更新给定池的 token 分配点。 只能由所有者调用。
+    function set(
+        uint256 _pid,
+        uint256 _allocPoint,
+        bool _withUpdate
+    ) public onlyOwner {
+        if (_withUpdate) {
+            massUpdatePools();
+        }
+        totalAllocPoint = totalAllocPoint.sub(poolInfo[_pid].allocPoint).add(
+            _allocPoint
+        );
+        poolInfo[_pid].allocPoint = _allocPoint;
+    }
+
+    // 查看功能以查看前端待处理的 SUSHI。
+    function pendingSushi(
+        uint256 _pid,
+        address _user
+    ) external view returns (uint256) {
+        PoolInfo storage pool = poolInfo[_pid];
+        UserInfo storage user = userInfo[_pid][_user];
+        uint256 accSushiPerShare = pool.accSushiPerShare;
+        if (block.timestamp > pool.lastRewardTime && pool.totalPower != 0) {
+            // 倍数
+            uint256 timeElapsed = block.timestamp - pool.lastRewardTime;
+            // sushi奖励 = 倍数x每块产出x池的分配点/总的分配点
+            uint256 sushiReward = timeElapsed
+                .mul(currentRewardPerSecond())
+                .mul(pool.allocPoint)
+                .div(totalAllocPoint);
+            // 每股累积 SUSHI = 当前值+（sushi奖励x1万亿/LP流动性）
+            accSushiPerShare = accSushiPerShare.add(
+                sushiReward.mul(1e12).div(pool.totalPower)
+            );
+        }
+        return user.amount.mul(accSushiPerShare).div(1e12).sub(user.rewardDebt);
+    }
+
+    // 更新所有池的奖励变量。 小心汽油消费！
+    function massUpdatePools() public {
+        uint256 length = poolInfo.length;
+        for (uint256 pid = 0; pid < length; ++pid) {
+            updatePool(pid);
+        }
+    }
+
+    // 更新给定池的奖励变量以保持最新。
+    function updatePool(uint256 _pid) public {
+        PoolInfo storage pool = poolInfo[_pid];
         if (block.timestamp <= pool.lastRewardTime) {
             return;
         }
-        uint256 powerSupply = IERC20(pool.powerToken).balanceOf(address(this));
-        if (powerSupply == 0) {
+        if (pool.totalPower == 0) {
             pool.lastRewardTime = block.timestamp;
             return;
         }
         uint256 timeElapsed = block.timestamp - pool.lastRewardTime;
-        uint256 sushiReward = timeElapsed * currentRewardPerSecond();
+        uint256 sushiReward = timeElapsed
+            .mul(currentRewardPerSecond())
+            .mul(pool.allocPoint)
+            .div(totalAllocPoint);
         token.mint(address(this), sushiReward);
+        // 给masterchef铸币 奖励数额
+        pool.accSushiPerShare = pool.accSushiPerShare.add(
+            sushiReward.mul(1e12).div(pool.totalPower)
+        );
         pool.lastRewardTime = block.timestamp;
-    }
-
-    // 檢查並更新礦池的分配點數（如果算力占比低於1%則設為0）
-    function updatePoolAllocPoint(uint256 poolId) public {
-        require(poolId > 0 && poolId < nextPoolId, "Invalid pool ID");
-        require(pools[poolId].creator != address(0), "Pool does not exist");
-
-        Pool storage pool = pools[poolId];
-        uint256 oldAllocPoint = pool.allocPoint;
-
-        if (totalAllocPoint == 0) {
-            pool.allocPoint = pool.totalPower;
-            totalAllocPoint = pool.allocPoint;
-            return;
-        }
-
-        // 計算算力占比（以基點為單位，1% = 100基點）
-        uint256 powerPercentage = 0;
-        if (totalAllocPoint > 0) {
-            powerPercentage = (pool.totalPower * 10000) / totalAllocPoint; // 10000 = 100%
-        }
-
-        // 如果算力占比低於1%（100基點），則allocPoint設為0
-        if (powerPercentage < 100) {
-            pool.allocPoint = 0;
-        } else {
-            pool.allocPoint = pool.totalPower;
-        }
-
-        // 更新總分配點數
-        if (pool.allocPoint != oldAllocPoint) {
-            totalAllocPoint = totalAllocPoint - oldAllocPoint + pool.allocPoint;
-        }
-    }
-
-    // 更新指定礦池的收益分配
-    function updatePoolReward(uint256 poolId) public {
-        require(poolId > 0 && poolId < nextPoolId, "Invalid pool ID");
-        require(pools[poolId].creator != address(0), "Pool does not exist");
-
-        Pool storage pool = pools[poolId];
-        uint256 currentTime = block.timestamp;
-        if (pool.allocPoint == 0) pool.lastRewardTime = currentTime;
-        if (pool.allocPoint == 0 || totalAllocPoint == 0) {
-            return;
-        }
-
-        if (currentTime > pool.lastRewardTime) {
-            uint256 timeElapsed = currentTime - pool.lastRewardTime;
-            uint256 poolTimeReward = (timeElapsed *
-                currentRewardPerSecond() *
-                pool.allocPoint) / totalAllocPoint;
-
-            if (pool.totalPower > 0) {
-                pool.accRewardPerShare = pool.accRewardPerShare.add(
-                    poolTimeReward.mul(1e12).div(pool.totalPower)
-                );
-            }
-            pool.lastRewardTime = currentTime;
-        }
-    }
-
-    function _createPool(address creator) internal returns (uint256) {
-        require(userPool[creator] == 0, "Already in a pool");
-        uint256 poolId = nextPoolId++;
-        pools[poolId] = Pool({
-            creator: creator,
-            totalPower: 0,
-            createdAt: block.timestamp,
-            allocPoint: 0,
-            accRewardPerShare: 0,
-            lastRewardTime: block.timestamp
-        });
-        userPool[creator] = poolId;
-        emit CreatePool(creator, poolId);
-        return poolId;
-    }
-
-    // 操作员创建矿池
-    function createPoolByOperator(address newCreator) external {
-        require(msg.sender == Operator, "Not operator");
-        require(newCreator != address(0), "Invalid new creator");
-        _createPool(newCreator);
-    }
-
-    // 創建礦池
-    function createPool() external returns (uint256) {
-        require(createPoolPublic || msg.sender == Operator, "Not authorized");
-        return _createPool(msg.sender);
-    }
-
-    // 转移矿池
-    function transferPool(uint256 poolId, address newCreator) external {
-        require(pools[poolId].creator == msg.sender, "Not creator");
-        pools[poolId].creator = newCreator;
-        emit TransferPool(poolId, msg.sender, newCreator);
-    }
-
-    function setPoolCommand(uint256 poolId, string memory command) external {
-        require(pools[poolId].creator == msg.sender, "Not creator");
-        require(bytes(command).length != 0, "Invalid command");
-        require(poolIdByCommand[command] == 0, "Command already exists");
-        poolIdByCommand[command] = poolId;
-        commandByPoolId[poolId] = command;
-        emit SetPoolCommand(poolId, command);
     }
 
     function bindInviter(address _inviter) external {
         require(inviter[msg.sender] == address(0), "Already bound");
         require(_inviter != address(0), "Invalid inviter");
-        require(inviter[_inviter] != msg.sender, "Inviter cannot be self");
+        require(inviter[_inviter] != msg.sender, "Inviter cannot be same as user");
+        require(_inviter != msg.sender, "Inviter cannot be self");
+
         inviter[msg.sender] = _inviter;
         inviteCount[_inviter] += 1;
         emit BindInviter(msg.sender, _inviter);
     }
 
-    // 加入礦池
-    function joinPool(uint256 poolId) public {
-        require(userPool[msg.sender] == 0, "Already in a pool");
-        require(pools[poolId].creator != address(0), "Pool not exist");
-        userPool[msg.sender] = poolId;
-        emit JoinPool(msg.sender, poolId);
-    }
+    function updatePrice() public {
+        if (block.timestamp <= lastPriceUpdateTime) return;
 
-    function joinPoolByCommand(string memory command) external {
-        require(poolIdByCommand[command] != 0, "Invalid command");
-        joinPool(poolIdByCommand[command]);
-    }
+        uint256 elapsed = block.timestamp - lastPriceUpdateTime;
 
-    // 離開礦池（必須沒有算力）
-    function leavePool() external {
-        require(userPool[msg.sender] != 0, "Not in a pool");
-        require(
-            userInfo[msg.sender].amount == 0,
-            "Must withdraw all power before leaving pool"
-        );
-        userPool[msg.sender] = 0;
-        emit LeavePool(msg.sender);
-    }
+        // 每秒线性摊：powerPerPrice += powerPerPrice * (bps/天) * 秒数 / 86400
+        uint256 delta = (powerPerPrice * depreciationPerDayBps * elapsed) /
+            (PRICE_DENOMINATOR * 86400);
 
-    // 修改deposit，存入時更新礦池總算力
-    function deposit(uint256 _amount) public {
-        require(userPool[msg.sender] != 0, "Must join a pool to mine");
-        require(block.timestamp >= startTime);
-
-        uint256 poolId = userPool[msg.sender];
-
-        PoolInfo storage pool = poolInfo;
-        UserInfo storage user = userInfo[msg.sender];
-        updatePool();
-        // 更新用戶所在礦池的收益
-        updatePoolReward(poolId);
-
-        if (user.amount == 0 && _amount > 0) {
-            activeMiners += 1;
+        if (delta > 0) {
+            powerPerPrice += delta;
         }
-        Pool storage userPoolData = pools[poolId];
+        lastPriceUpdateTime = block.timestamp;
+        //每天自动提现一次
+        // if (block.timestamp - lastwithdrawTime >= 86400) {
+        //     withdraw();
+        // }
+    }
+
+    // 将 LP 代币存入 MasterChef 以分配 SUSHI。
+    function deposit(uint256 _pid, uint256 _amount) public {
+        require(_amount > 0, "Invalid amount");
+        require(userNode[msg.sender] >0 ,"ust join a pool to mine");
+
+        updatePrice();
+        PoolInfo storage pool = poolInfo[_pid];
+        UserInfo storage user = userInfo[_pid][msg.sender];
+        updatePool(_pid);
         if (user.amount > 0) {
             uint256 pending = user
                 .amount
-                .mul(userPoolData.accRewardPerShare)
+                .mul(pool.accSushiPerShare)
                 .div(1e12)
                 .sub(user.rewardDebt);
-            // 處理用戶收益和手續費
-            _processUserRewardAndFee(pending, msg.sender, userPoolData.creator);
+            _processUserRewardAndFee(_pid, pending, msg.sender);
         }
-        TransferHelper.safeTransferFrom(
-            pool.powerToken,
-            msg.sender,
+        pool.lpToken.safeTransferFrom(
+            address(msg.sender),
             address(this),
             _amount
         );
-        user.amount = user.amount.add(_amount);
-        user.rewardDebt = user.amount.mul(userPoolData.accRewardPerShare).div(
-            1e12
-        );
-        // 更新礦池總算力和分配點數
-        pools[poolId].totalPower += _amount;
-        updatePoolAllocPoint(poolId);
-        emit Deposit(msg.sender, _amount);
+
+        // 更新矿池总算力
+        uint256 powerAmount = (_amount * powerPerPrice) / pool.decimals;
+        pool.totalPower = pool.totalPower.add(powerAmount);
+        user.amount = user.amount.add(powerAmount);
+        user.rewardDebt = user.amount.mul(pool.accSushiPerShare).div(1e12);
+        emit Deposit(msg.sender, _pid, _amount, powerAmount);
     }
 
-    // 修改withdraw，提取時更新礦池總算力
-    function withdraw(uint256 _amount) public {
-        PoolInfo storage pool = poolInfo;
-        UserInfo storage user = userInfo[msg.sender];
-        require(user.amount >= _amount, "withdraw: not good");
-        updatePool();
-
-        uint256 poolId = userPool[msg.sender];
-        // 更新用戶所在礦池的收益
-        updatePoolReward(poolId);
-
-        Pool storage userPoolData = pools[poolId];
-        uint256 pending = user
-            .amount
-            .mul(userPoolData.accRewardPerShare)
-            .div(1e12)
-            .sub(user.rewardDebt);
-        // 處理用戶收益和手續費
-        _processUserRewardAndFee(pending, msg.sender, userPoolData.creator);
-        user.amount = user.amount.sub(_amount);
-        user.rewardDebt = user.amount.mul(userPoolData.accRewardPerShare).div(
-            1e12
+    // 从 MasterChef 中提现 LP 代币。
+    function withdraw(uint256 _pid, uint256 _powerAmount) public {
+        PoolInfo storage pool = poolInfo[_pid];
+        UserInfo storage user = userInfo[_pid][msg.sender];
+        require(_powerAmount > 0, "Invalid power amount");
+        require(user.amount >= _powerAmount, "withdraw: not good");
+        updatePrice();
+        updatePool(_pid);
+        uint256 pending = user.amount.mul(pool.accSushiPerShare).div(1e12).sub(
+            user.rewardDebt
         );
-        TransferHelper.safeTransfer(pool.powerToken, msg.sender, _amount);
-        // 更新礦池總算力和分配點數
-        if (poolId != 0) {
-            pools[poolId].totalPower -= _amount;
-            updatePoolAllocPoint(poolId);
-        }
-        if (user.amount == 0 && _amount > 0) {
-            activeMiners -= 1;
-        }
-        emit Withdraw(msg.sender, _amount);
+        _processUserRewardAndFee(_pid, pending, msg.sender);
+
+        // 更新矿池总算力
+        uint256 _amount = (_powerAmount * pool.decimals) / powerPerPrice;
+        pool.totalPower = pool.totalPower.sub(_powerAmount);
+        user.amount = user.amount.sub(_powerAmount);
+        user.rewardDebt = user.amount.mul(pool.accSushiPerShare).div(1e12);
+        pool.lpToken.safeTransfer(address(msg.sender), _amount);
+        emit Withdraw(msg.sender, _pid, _amount, _powerAmount);
     }
 
-    // 修改emergencyWithdraw，提取時更新礦池總算力
-    function emergencyWithdraw() public {
-        PoolInfo storage pool = poolInfo;
-        UserInfo storage user = userInfo[msg.sender];
-        TransferHelper.safeTransfer(
-            pool.powerToken,
-            address(msg.sender),
-            user.amount
-        );
-        emit EmergencyWithdraw(msg.sender, user.amount);
-        // 更新礦池總算力和分配點數
-        uint256 poolId = userPool[msg.sender];
-        if (poolId != 0) {
-            pools[poolId].totalPower -= user.amount;
-            updatePoolAllocPoint(poolId);
-        }
-        if (user.amount > 0) {
-            activeMiners -= 1;
-        }
+    // 提现而不关心奖励。 仅限紧急情况。
+    function emergencyWithdraw(uint256 _pid) public {
+        PoolInfo storage pool = poolInfo[_pid];
+        UserInfo storage user = userInfo[_pid][msg.sender];
+        require(user.amount > 0, "Invalid user amount");
+
+        uint256 _amount = (user.amount * pool.decimals) / powerPerPrice;
+        pool.lpToken.safeTransfer(address(msg.sender), _amount);
+        emit EmergencyWithdraw(msg.sender, _pid, _amount, user.amount);
+        // 更新矿池总算力
+        pool.totalPower = pool.totalPower.sub(user.amount);
         user.amount = 0;
         user.rewardDebt = 0;
     }
 
-    // 修改takerWithdraw，僅加入礦池時扣5%給礦池創建者，未加入礦池不能挖礦也不能提現
-    function takerWithdraw() public {
-        UserInfo storage user = userInfo[msg.sender];
-        updatePool();
-
-        uint256 poolId = userPool[msg.sender];
-        Pool storage userPoolData = pools[poolId];
+    // 直接领取收益
+    function takerWithdraw(uint256 _pid) public {
+        PoolInfo storage pool = poolInfo[_pid];
+        UserInfo storage user = userInfo[_pid][msg.sender];
+        updatePool(_pid);
         if (user.amount > 0) {
-            require(poolId != 0, "Must join a pool to withdraw");
-
-            // 更新用戶所在礦池的收益
-            updatePoolReward(poolId);
-
             uint256 pending = user
                 .amount
-                .mul(userPoolData.accRewardPerShare)
+                .mul(pool.accSushiPerShare)
                 .div(1e12)
                 .sub(user.rewardDebt);
-            // 處理用戶收益和手續費，手續費給礦池創建者
-            _processUserRewardAndFee(pending, msg.sender, userPoolData.creator);
+            _processUserRewardAndFee(_pid, pending, msg.sender);
         }
-        user.rewardDebt = user.amount.mul(userPoolData.accRewardPerShare).div(
-            1e12
-        );
+        user.rewardDebt = user.amount.mul(pool.accSushiPerShare).div(1e12);
     }
 
-    // 處理用戶收益和手續費的內部函數
+    // 处理用户收益和手续费的内部函数
     function _processUserRewardAndFee(
+        uint256 _pid,
         uint256 pending,
-        address userAddress,
-        address feeTo
+        address userAddress
     ) internal {
-        if (pending > 0) {
-            uint256 fee = (pending * 5) / 100; // 5% 手續費
-            uint256 toUser = pending - fee;
+        uint256 baseInviteReward = (pending * inviteRewardRate) /
+            INVITE_REWARD_RATE_BASIS_POINTS;
+        uint256 toUser = pending - baseInviteReward;
 
-            if (inviter[userAddress] != address(0) && inviteRewardRate > 0) {
-                address inviterAddress = inviter[userAddress];
-                uint256 userPower = userInfo[userAddress].amount;
-                uint256 inviterPower = userInfo[inviterAddress].amount;
+        if (inviter[userAddress] != address(0) && inviteRewardRate > 0) {
+            address inviterAddress = inviter[userAddress];
+            uint256 userPower = userInfo[_pid][userAddress].amount;
+            uint256 inviterPower = userInfo[_pid][inviterAddress].amount;
 
-                if (inviterPower > 0 && userPower > 0) {
-                    uint256 baseInviteReward = (pending * inviteRewardRate) /
-                        INVITE_REWARD_RATE_BASIS_POINTS;
-                    uint256 finalInviteReward = 0;
+            if (inviterPower > 0 && userPower > 0) {
+                uint256 finalInviteReward = 0;
 
-                    // 核心烧伤逻辑 inviterPower / userPower < burnRate / 1000
-                    // (50*500/100)/1000
-                    if (
-                        burnRate > 0 &&
-                        (inviterPower * BURN_RATE_BASIS_POINTS <
-                            userPower * burnRate)
-                    ) {
-                        // 触发烧伤
-                        finalInviteReward =
-                            (baseInviteReward *
-                                inviterPower *
-                                BURN_RATE_BASIS_POINTS) /
-                            (userPower * burnRate);
-                    } else {
-                        finalInviteReward = baseInviteReward;
+                if (
+                    burnRate > 0 &&
+                    (inviterPower  < userPower)
+                ) {
+                    // 触发烧伤
+                    finalInviteReward =
+                        (baseInviteReward * inviterPower ) / userPower;
+
+                    uint256 burnAmount = baseInviteReward - finalInviteReward;
+                    if (burnAmount > 0) {
+                        safeSushiTransfer(fundAddress, burnAmount);
+                    }
+                } else {
+                    finalInviteReward = baseInviteReward;
+                }
+
+                if (finalInviteReward > 0) {
+                    if (finalInviteReward > toUser) {
+                        finalInviteReward = toUser;
                     }
 
-                    if (finalInviteReward > 0) {
-                        if (finalInviteReward > toUser) {
-                            finalInviteReward = toUser;
-                        }
-
-                        toUser = toUser - finalInviteReward;
-                        totalInviteReward[inviterAddress] = totalInviteReward[
-                            inviterAddress
-                        ].add(finalInviteReward);
-                        safeSushiTransfer(inviterAddress, finalInviteReward);
-                        emit InviteReward(
-                            userAddress,
-                            inviterAddress,
-                            finalInviteReward
-                        );
-                    }
+                    toUser = toUser - finalInviteReward;
+                    totalInviteReward[inviterAddress] = totalInviteReward[
+                        inviterAddress
+                    ].add(finalInviteReward);
+                    safeSushiTransfer(inviterAddress, finalInviteReward);
+                    emit InviteReward(
+                        _pid,
+                        userAddress,
+                        inviterAddress,
+                        finalInviteReward
+                    );
                 }
             }
+        }
 
-            if (toUser > 0) {
-                userInfo[userAddress].totalReward = userInfo[userAddress]
-                    .totalReward
-                    .add(toUser);
-                safeSushiTransfer(userAddress, toUser);
-                emit TakeUserReward(userAddress, toUser);
-            }
-
-            if (fee > 0 && feeTo != address(0)) {
-                safeSushiTransfer(feeTo, fee);
-                emit TakeFee(feeTo, fee);
-            }
+        if (toUser > 0) {
+            userInfo[_pid][userAddress].totalReward = userInfo[_pid][
+                userAddress
+            ].totalReward.add(toUser);
+            safeSushiTransfer(userAddress, toUser);
+            emit TakeUserReward(_pid, userAddress, toUser);
         }
     }
 
@@ -1098,75 +1124,16 @@ contract MasterChef is Ownable {
         }
     }
 
-    // 查詢活躍礦工數量
-    function getActiveMiners() external view returns (uint256) {
-        return activeMiners;
-    }
-
-    // 查詢用戶累計收益
-    function getTotalReward(address user) external view returns (uint256) {
-        return userInfo[user].totalReward;
-    }
-
-    // 查詢總分配點數
-    function getTotalAllocPoint() external view returns (uint256) {
-        return totalAllocPoint;
-    }
-
-    // 查詢礦池收益信息
-    function getPoolRewardInfo(
-        uint256 poolId
-    )
-        external
-        view
-        returns (
-            uint256 allocPoint,
-            uint256 accRewardPerShare,
-            uint256 lastRewardTime,
-            uint256 totalPower
-        )
-    {
-        Pool storage pool = pools[poolId];
-        return (
-            pool.allocPoint,
-            pool.accRewardPerShare,
-            pool.lastRewardTime,
-            pool.totalPower
-        );
-    }
-
-    // 查詢礦池算力占比（以基點為單位，1% = 100基點）
-    function getPoolPowerPercentage(
-        uint256 poolId
-    ) external view returns (uint256) {
-        require(poolId > 0 && poolId < nextPoolId, "Invalid pool ID");
-        require(pools[poolId].creator != address(0), "Pool does not exist");
-
-        Pool storage pool = pools[poolId];
-        if (totalAllocPoint == 0) {
-            return 0;
-        }
-        return (pool.totalPower * 10000) / totalAllocPoint; // 10000 = 100%
-    }
-
-    // 手動更新指定礦池的分配點數（管理員功能）
-    function updatePoolAllocPointManually(uint256 poolId) external {
-        require(poolId > 0 && poolId < nextPoolId, "Invalid pool ID");
-        require(pools[poolId].creator != address(0), "Pool does not exist");
-        updatePoolAllocPoint(poolId);
-    }
-
-    // 批量更新礦池收益（可選，用於管理員或緊急情況）
-    function updateMultiplePoolsReward(uint256[] calldata poolIds) external {
-        for (uint256 i = 0; i < poolIds.length; i++) {
-            uint256 poolId = poolIds[i];
-            if (
-                poolId > 0 &&
-                poolId < nextPoolId &&
-                pools[poolId].creator != address(0)
-            ) {
-                updatePoolReward(poolId);
-            }
+    function takeWithdrawFee(uint256 _pid) public {
+        PoolInfo memory pool = poolInfo[_pid];
+        uint256 balance = pool.lpToken.balanceOf(address(this));
+        uint256 totalRefundBalance = (pool.totalPower * pool.decimals) /
+            powerPerPrice;
+        if (balance > totalRefundBalance) {
+            pool.lpToken.safeTransfer(
+                address(fundAddress),
+                balance - totalRefundBalance
+            );
         }
     }
 }
