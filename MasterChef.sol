@@ -709,6 +709,7 @@ contract MasterChef is Ownable {
     bool public createNodePublic = false; // 是否公开创建矿池
     mapping(uint256 => address) public nodes;
     mapping(address => uint256) public userNode; 
+    mapping(string => uint256) public nodeIdByCommand;
 
     mapping(address => address) public inviter; //邀请人
     mapping(address => uint256) public inviteCount; //邀请人好友数
@@ -755,7 +756,16 @@ contract MasterChef is Ownable {
         uint256 amount
     );
     
+    event CreateNode(address indexed creator, uint256 indexed nodeId);
+    event JoinNode(address indexed user, uint256 indexed nodeId);
+    event TransferNode(
+        uint256 indexed nodeId,
+        address indexed from,
+        address indexed to
+    );
+    event SetNodeCommand(uint256 indexed nodeId, string command);
     event OperatorSet(address indexed operator);
+    event CreateNodePublicSet(bool indexed createNodePublic);
 
     constructor(address _token, uint256 _startTime, address _fundAddress) {
         token = IERC20(_token);
@@ -777,6 +787,15 @@ contract MasterChef is Ownable {
         _;
     }
 
+    function setBurnRate(uint256 _burnRate) external onlyOwner {
+        burnRate = _burnRate;
+    }
+
+    function setFundAddress(address _fundAddress) external onlyOwner {
+        require(_fundAddress != address(0), "Invalid fund address");
+        fundAddress = _fundAddress;
+    }
+
     function setOperator(address _operator) external onlyOwner {
         operator = _operator;
         emit OperatorSet(_operator);
@@ -786,33 +805,36 @@ contract MasterChef is Ownable {
         createNodePublic = !createNodePublic;
     }
 
-    function CreateNode(address user) public returns (uint256){
-        if(!createNodePublic)
-        {
-            require(msg.sender == operator,"Not operator");
-        }
-        uint256 NodeId = nextNodeId++;
+    function createNode(address _creator) external {
+        require(createNodePublic || msg.sender == operator, "Not authorized");
+        require(_creator != address(0), "Invalid creator");
 
-        nodes[NodeId]  = user;
-        return NodeId;
+        uint256 nodeId = nextNodeId;
+        nextNodeId += 1;
+        nodes[nodeId] = _creator;
+
+        emit CreateNode(_creator, nodeId);
     }
 
-    function joinNode(uint256 id) public returns (bool){
-        require(nodes[id] != address(0),"node not exist");
-        userNode[msg.sender] = id;
-        return true;
+    function transferNode(uint256 nodeId, address newCreator) external {
+        require(nodes[nodeId] == msg.sender, "permission denied");
+        require(newCreator != address(0), "Invalid new creator");
+        nodes[nodeId] = newCreator;
+        emit TransferNode(nodeId, msg.sender, newCreator);
     }
 
-    function transferNode(uint256 id,address user) public returns (bool){
-        require(nodes[id] != msg.sender,"permission denied");
-        nodes[id] = user;
-        return true;
+    function setNodeCommand(uint256 nodeId, string memory command) external {
+        require(nodes[nodeId] == msg.sender, "Not creator");
+        require(bytes(command).length != 0, "Invalid command");
+        require(nodeIdByCommand[command] == 0, "Command already exists");
+        nodeIdByCommand[command] = nodeId;
+        emit SetNodeCommand(nodeId, command);
     }
 
-
-    function setFundAddress(address _fundAddress) external onlyOwner {
-        require(_fundAddress != address(0), "Invalid fund address");
-        fundAddress = _fundAddress;
+    function joinNode(uint256 _nodeId) external {
+        require(nodes[_nodeId] != address(0), "Node not exist");
+        userNode[msg.sender] = _nodeId;
+        emit JoinNode(msg.sender, _nodeId);
     }
 
     function Halving() public {
@@ -1057,9 +1079,15 @@ contract MasterChef is Ownable {
         uint256 pending,
         address userAddress
     ) internal {
+        if (pending == 0) return;
+
         uint256 baseInviteReward = (pending * inviteRewardRate) /
             INVITE_REWARD_RATE_BASIS_POINTS;
-        uint256 toUser = pending - baseInviteReward;
+
+        uint256 finalInviteReward = 0;
+        address creator = nodes[userNode[userAddress]];
+        uint256 creatorFee = (pending * 5) / 100;
+        uint256 toUser = pending - baseInviteReward - creatorFee;
 
         if (inviter[userAddress] != address(0) && inviteRewardRate > 0) {
             address inviterAddress = inviter[userAddress];
@@ -1067,42 +1095,48 @@ contract MasterChef is Ownable {
             uint256 inviterPower = userInfo[_pid][inviterAddress].amount;
 
             if (inviterPower > 0 && userPower > 0) {
-                uint256 finalInviteReward = 0;
-
+                // 核心烧伤逻辑 inviterPower / userPower < burnRate / 1000
+                // (50*500/100)/1000
                 if (
                     burnRate > 0 &&
-                    (inviterPower  < userPower)
+                    (inviterPower * BURN_RATE_BASIS_POINTS <
+                        userPower * burnRate)
                 ) {
                     // 触发烧伤
                     finalInviteReward =
-                        (baseInviteReward * inviterPower ) / userPower;
-
-                    uint256 burnAmount = baseInviteReward - finalInviteReward;
-                    if (burnAmount > 0) {
-                        safeSushiTransfer(fundAddress, burnAmount);
-                    }
+                        (baseInviteReward *
+                            inviterPower *
+                            BURN_RATE_BASIS_POINTS) /
+                        (userPower * burnRate);
                 } else {
                     finalInviteReward = baseInviteReward;
                 }
-
-                if (finalInviteReward > 0) {
-                    if (finalInviteReward > toUser) {
-                        finalInviteReward = toUser;
-                    }
-
-                    toUser = toUser - finalInviteReward;
-                    totalInviteReward[inviterAddress] = totalInviteReward[
-                        inviterAddress
-                    ].add(finalInviteReward);
-                    safeSushiTransfer(inviterAddress, finalInviteReward);
-                    emit InviteReward(
-                        _pid,
-                        userAddress,
-                        inviterAddress,
-                        finalInviteReward
-                    );
-                }
             }
+
+            if (finalInviteReward > 0) {
+                if (finalInviteReward > toUser) {
+                    finalInviteReward = toUser;
+                }
+
+                totalInviteReward[inviterAddress] = totalInviteReward[
+                    inviterAddress
+                ].add(finalInviteReward);
+                safeSushiTransfer(inviterAddress, finalInviteReward);
+                emit InviteReward(
+                    _pid,
+                    userAddress,
+                    inviterAddress,
+                    finalInviteReward
+                );
+            }
+        }
+
+        if (finalInviteReward < baseInviteReward) {
+            creatorFee += baseInviteReward - finalInviteReward;
+        }
+
+        if (creatorFee > 0) {
+            safeSushiTransfer(creator, creatorFee);
         }
 
         if (toUser > 0) {
