@@ -970,7 +970,7 @@ contract MasterChef is Ownable {
     // 将 LP 代币存入 MasterChef 以分配 SUSHI。
     function deposit(uint256 _pid, uint256 _amount) public {
         require(_amount > 0, "Invalid amount");
-        require(userNode[msg.sender] >0 ,"ust join a pool to mine");
+        require(userNode[msg.sender] >0 ,"Must join a pool to mine");
 
         updatePrice();
         PoolInfo storage pool = poolInfo[_pid];
