@@ -959,8 +959,8 @@ contract MasterChef is Ownable {
 
         if (delta > 0) {
             powerPerPrice += delta;
+            lastPriceUpdateTime = block.timestamp;
         }
-        lastPriceUpdateTime = block.timestamp;
         //每天自动提现一次
         // if (block.timestamp - lastwithdrawTime >= 86400) {
         //     withdraw();
